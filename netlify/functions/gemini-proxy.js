@@ -81,23 +81,44 @@ function jsonResponse(statusCode, body, corsHeaders = {}) {
  * @returns {Array} Array of batch objects with headers and rows
  */
 function createBatches(csvText) {
+  // Debug: Check actual content
+  console.log(`[BATCH_PARSE] Raw input length: ${csvText.length}`);
+  console.log(`[BATCH_PARSE] First 500 chars (raw): ${JSON.stringify(csvText.substring(0, 500))}`);
+  
+  // Check for different line endings
+  const hasRN = csvText.includes('\r\n');
+  const hasR = csvText.includes('\r');
+  const hasN = csvText.includes('\n');
+  
+  console.log(`[BATCH_PARSE] Line endings - CRLF: ${hasRN}, CR: ${hasR}, LF: ${hasN}`);
+  
   // Normalize line endings (handle \r\n, \r, \n)
-  const normalized = csvText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  let normalized = csvText;
+  if (hasRN) {
+    normalized = csvText.replace(/\r\n/g, '\n');
+  } else if (hasR) {
+    normalized = csvText.replace(/\r/g, '\n');
+  }
+  
+  console.log(`[BATCH_PARSE] After normalization length: ${normalized.length}`);
   
   // Split and filter empty lines
-  const lines = normalized.split('\n').filter(line => line.trim() !== '');
+  const allLines = normalized.split('\n');
+  console.log(`[BATCH_PARSE] Total lines after split: ${allLines.length}`);
   
-  console.log(`[BATCH_PARSE] Total lines after split: ${lines.length}`);
+  const lines = allLines.filter(line => line.trim() !== '');
+  console.log(`[BATCH_PARSE] Lines after filtering empty: ${lines.length}`);
   
   if (lines.length < 2) {
-    console.error(`[BATCH_PARSE] Not enough lines (need at least 2: header + 1 data row). Got ${lines.length}`);
+    console.error(`[BATCH_PARSE] ❌ Not enough lines. Need at least 2 (header + data). Got ${lines.length}`);
+    console.error(`[BATCH_PARSE] First 5 lines: ${lines.slice(0, 5).map((l, i) => `${i}: ${l.substring(0, 50)}`).join(' | ')}`);
     return [];
   }
 
   const headers = lines[0];
   const dataRows = lines.slice(1);
   
-  console.log(`[BATCH_PARSE] Headers: ${headers.substring(0, 50)}...`);
+  console.log(`[BATCH_PARSE] Headers: ${headers.substring(0, 100)}...`);
   console.log(`[BATCH_PARSE] Data rows: ${dataRows.length}`);
   
   const batches = [];
@@ -115,7 +136,13 @@ function createBatches(csvText) {
     });
   }
 
-  console.log(`[BATCH_PARSE] Created ${batches.length} batches from ${dataRows.length} rows`);
+  console.log(`[BATCH_PARSE] ✅ Created ${batches.length} batches from ${dataRows.length} data rows`);
+  batches.forEach((b, idx) => {
+    if (idx === 0 || idx === batches.length - 1) {
+      console.log(`[BATCH_PARSE] Batch ${b.batchNumber}: rows ${b.rowStart}-${b.rowEnd} (${b.rowCount} rows)`);
+    }
+  });
+  
   return batches;
 }
 
