@@ -1,12 +1,9 @@
-// Netlify serverless function - Secure Gemini API Proxy
+// Netlify serverless function - Secure Gemini API Proxy with Enhanced Error Handling
 // Location: /netlify/functions/gemini-proxy.js
 
-// In-memory rate limiter (for single-instance deployment)
-// For multi-instance, consider using Netlify Blobs or external service
 const rateLimitMap = new Map();
 
 function getRateLimitKey(event) {
-  // Use client IP or fallback to user agent
   return (
     event.headers['x-forwarded-for']?.split(',')[0] ||
     event.headers['cf-connecting-ip'] ||
@@ -20,13 +17,12 @@ function checkRateLimit(key, maxRequests = 10, windowMs = 60000) {
   const userLimit = rateLimitMap.get(key) || { count: 0, resetTime: now + windowMs };
 
   if (now > userLimit.resetTime) {
-    // Reset window
     rateLimitMap.set(key, { count: 1, resetTime: now + windowMs });
     return true;
   }
 
   if (userLimit.count >= maxRequests) {
-    return false; // Rate limit exceeded
+    return false;
   }
 
   userLimit.count++;
@@ -34,7 +30,6 @@ function checkRateLimit(key, maxRequests = 10, windowMs = 60000) {
   return true;
 }
 
-// Validate request payload structure
 function validatePayload(payload) {
   if (!payload || typeof payload !== 'object') {
     return { valid: false, error: 'Invalid request body' };
@@ -48,7 +43,6 @@ function validatePayload(payload) {
     return { valid: false, error: 'Contents array cannot be empty' };
   }
 
-  // Validate each content object
   for (const content of payload.contents) {
     if (!content.parts || !Array.isArray(content.parts)) {
       return { valid: false, error: 'Invalid content structure' };
@@ -61,26 +55,34 @@ function validatePayload(payload) {
   return { valid: true };
 }
 
+// Helper to return JSON responses consistently
+function jsonResponse(statusCode, body, corsHeaders = {}) {
+  const defaultHeaders = {
+    'Content-Type': 'application/json',
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY'
+  };
+
+  return {
+    statusCode,
+    headers: { ...defaultHeaders, ...corsHeaders },
+    body: JSON.stringify(body)
+  };
+}
+
 exports.handler = async function (event, context) {
-  // Set default timeout
   context.callbackWaitsForEmptyEventLoop = false;
+  
+  const timestamp = new Date().toISOString();
+  const rateLimitKey = getRateLimitKey(event);
 
-  // === SECURITY CHECKS ===
+  // === LOGGING ===
+  console.log(`[${timestamp}] Incoming request: ${event.httpMethod} from ${rateLimitKey}`);
 
-  // 1. HTTP method validation
-  if (event.httpMethod !== 'POST') {
-    return {
-      statusCode: 405,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ error: 'Method Not Allowed. Only POST requests are accepted.' })
-    };
-  }
-
-  // 2. CORS headers - Adjust origin as needed
+  // === CORS SETUP ===
   const allowedOrigins = [
-    'https://inspiring-palmier-cf0dfe.netlify.app',
-    'https://main--inspiring-palmier-cf0dfe.netlify.app',
-    // Add your custom domain here when ready
+    'inspiring-palmier-cf0dfe.netlify.app',
+    'main--inspiring-palmier-cf0dfe.netlify.app',
   ];
   
   const origin = event.headers['origin'] || event.headers['referer'];
@@ -89,148 +91,150 @@ exports.handler = async function (event, context) {
   const corsHeaders = {
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Max-Age': '86400',
-    'X-Content-Type-Options': 'nosniff',
-    'X-Frame-Options': 'DENY',
-    'Content-Type': 'application/json'
+    'Access-Control-Max-Age': '86400'
   };
 
   if (isAllowedOrigin) {
     corsHeaders['Access-Control-Allow-Origin'] = origin;
   }
 
-  // Handle CORS preflight
+  // === HTTP METHOD CHECK ===
   if (event.httpMethod === 'OPTIONS') {
-    return {
-      statusCode: 200,
-      headers: corsHeaders,
-      body: JSON.stringify({ message: 'OK' })
-    };
+    console.log(`[${timestamp}] CORS preflight request`);
+    return jsonResponse(200, { message: 'OK' }, corsHeaders);
   }
 
-  // 3. Rate limiting
-  const rateLimitKey = getRateLimitKey(event);
-  if (!checkRateLimit(rateLimitKey, 10, 60000)) { // 10 requests per 60 seconds
-    return {
-      statusCode: 429,
-      headers: corsHeaders,
-      body: JSON.stringify({ 
-        error: 'Too many requests. Please wait before trying again.' 
-      })
-    };
+  if (event.httpMethod !== 'POST') {
+    console.warn(`[${timestamp}] Invalid method: ${event.httpMethod}`);
+    return jsonResponse(405, { error: 'Method Not Allowed. Only POST requests are accepted.' }, corsHeaders);
   }
 
-  // 4. Request size validation (max 1MB)
+  // === RATE LIMITING ===
+  if (!checkRateLimit(rateLimitKey, 10, 60000)) {
+    console.warn(`[${timestamp}] Rate limit exceeded for ${rateLimitKey}`);
+    return jsonResponse(429, { error: 'Too many requests. Please wait before trying again.' }, corsHeaders);
+  }
+
+  // === REQUEST SIZE CHECK ===
   const contentLength = parseInt(event.headers['content-length'], 10);
   if (contentLength > 1024 * 1024) {
-    return {
-      statusCode: 413,
-      headers: corsHeaders,
-      body: JSON.stringify({ error: 'Request payload too large. Maximum 1MB.' })
-    };
+    console.warn(`[${timestamp}] Request too large: ${contentLength} bytes`);
+    return jsonResponse(413, { error: 'Request payload too large. Maximum 1MB.' }, corsHeaders);
   }
 
-  // === API KEY RETRIEVAL ===
+  // === API KEY CHECK ===
   const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
   if (!GEMINI_API_KEY) {
-    console.error('CRITICAL: GEMINI_API_KEY not configured');
-    return {
-      statusCode: 500,
-      headers: corsHeaders,
-      body: JSON.stringify({ 
-        error: 'Server configuration error. Please contact support.' 
-      })
-    };
+    console.error(`[${timestamp}] CRITICAL: GEMINI_API_KEY environment variable not set!`);
+    return jsonResponse(500, { 
+      error: 'Server configuration error: API key not found. Please check Netlify environment variables.' 
+    }, corsHeaders);
   }
+  console.log(`[${timestamp}] API key found (length: ${GEMINI_API_KEY.length})`);
 
   // === REQUEST PROCESSING ===
   try {
-    // Parse and validate payload
+    // Parse payload
     let payload;
     try {
       payload = JSON.parse(event.body);
-    } catch (e) {
-      return {
-        statusCode: 400,
-        headers: corsHeaders,
-        body: JSON.stringify({ error: 'Invalid JSON in request body' })
-      };
+      console.log(`[${timestamp}] Payload parsed successfully`);
+    } catch (parseError) {
+      console.error(`[${timestamp}] JSON parse error:`, parseError.message);
+      return jsonResponse(400, { error: 'Invalid JSON in request body' }, corsHeaders);
     }
 
-    // Validate payload structure
+    // Validate payload
     const validation = validatePayload(payload);
     if (!validation.valid) {
-      return {
-        statusCode: 400,
-        headers: corsHeaders,
-        body: JSON.stringify({ error: validation.error })
-      };
+      console.warn(`[${timestamp}] Payload validation failed: ${validation.error}`);
+      return jsonResponse(400, { error: validation.error }, corsHeaders);
     }
+    console.log(`[${timestamp}] Payload validation passed`);
 
-    // Call Gemini API
+    // === CALL GEMINI API ===
     const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${GEMINI_API_KEY}`;
     
-    const response = await fetch(GEMINI_API_URL, {
+    console.log(`[${timestamp}] Calling Gemini API...`);
+    
+    const geminiResponse = await fetch(GEMINI_API_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(30000) // 30 second timeout
+      signal: AbortSignal.timeout(30000)
     });
 
-    // Handle API errors
-    if (!response.ok) {
-      const errorBody = await response.text();
-      console.error(`Gemini API Error (${response.status}):`, errorBody);
+    console.log(`[${timestamp}] Gemini response status: ${geminiResponse.status}`);
 
-      // Map common Gemini errors to user-friendly messages
-      let userMessage = 'An error occurred while processing your request.';
-      if (response.status === 400) {
-        userMessage = 'Invalid request format. Please check your input.';
-      } else if (response.status === 401 || response.status === 403) {
-        userMessage = 'Authentication failed. Please contact support.';
-      } else if (response.status === 429) {
-        userMessage = 'API rate limit exceeded. Please try again later.';
-      } else if (response.status === 500) {
-        userMessage = 'Gemini API is temporarily unavailable. Please try again.';
+    // === HANDLE GEMINI ERROR ===
+    if (!geminiResponse.ok) {
+      let errorBody = '';
+      try {
+        errorBody = await geminiResponse.text();
+        console.error(`[${timestamp}] Gemini API error response:`, errorBody);
+      } catch (e) {
+        console.error(`[${timestamp}] Could not read error response body`);
       }
 
-      return {
-        statusCode: response.status >= 500 ? 503 : response.status,
-        headers: corsHeaders,
-        body: JSON.stringify({ error: userMessage })
-      };
+      let userMessage = 'An error occurred while processing your request.';
+      
+      if (geminiResponse.status === 400) {
+        userMessage = 'Invalid request format. Please check your input.';
+      } else if (geminiResponse.status === 401 || geminiResponse.status === 403) {
+        userMessage = 'Authentication failed. Please verify your API key and try again.';
+      } else if (geminiResponse.status === 429) {
+        userMessage = 'Gemini API rate limit exceeded. Please wait a moment and try again.';
+      } else if (geminiResponse.status === 500) {
+        userMessage = 'Gemini API is experiencing issues. Please try again later.';
+      }
+
+      console.error(`[${timestamp}] Returning error to client: ${userMessage}`);
+      return jsonResponse(
+        geminiResponse.status >= 500 ? 503 : geminiResponse.status,
+        { error: userMessage },
+        corsHeaders
+      );
     }
 
-    // Parse and return Gemini response
-    const data = await response.json();
+    // === PARSE GEMINI RESPONSE ===
+    let data;
+    try {
+      data = await geminiResponse.json();
+      console.log(`[${timestamp}] Gemini response parsed successfully`);
+    } catch (parseError) {
+      console.error(`[${timestamp}] Failed to parse Gemini response:`, parseError.message);
+      return jsonResponse(502, { 
+        error: 'Failed to parse Gemini response. The API may be experiencing issues.' 
+      }, corsHeaders);
+    }
 
-    // Optional: Log successful requests for analytics (store in environment if needed)
-    console.log(`[${new Date().toISOString()}] Successful Gemini call from ${rateLimitKey}`);
+    // === VALIDATE GEMINI RESPONSE ===
+    if (!data.candidates || !Array.isArray(data.candidates) || data.candidates.length === 0) {
+      console.error(`[${timestamp}] Gemini returned no candidates:`, JSON.stringify(data).substring(0, 200));
+      return jsonResponse(502, { 
+        error: 'Gemini API returned an empty response. Please try again.' 
+      }, corsHeaders);
+    }
 
-    return {
-      statusCode: 200,
-      headers: corsHeaders,
-      body: JSON.stringify(data)
-    };
+    console.log(`[${timestamp}] Success! Returning response with ${data.candidates.length} candidate(s)`);
+
+    return jsonResponse(200, data, corsHeaders);
 
   } catch (error) {
-    // Handle timeout or fetch errors
+    // === HANDLE TIMEOUT ===
     if (error.name === 'AbortError') {
-      console.error('Request timeout:', error.message);
-      return {
-        statusCode: 504,
-        headers: corsHeaders,
-        body: JSON.stringify({ error: 'Request timeout. Please try again.' })
-      };
+      console.error(`[${timestamp}] Request timeout (30s exceeded)`);
+      return jsonResponse(504, { 
+        error: 'Request timeout. The API took too long to respond. Please try again.' 
+      }, corsHeaders);
     }
 
-    console.error('[SERVERLESS_ERROR]', error.message);
-    return {
-      statusCode: 500,
-      headers: corsHeaders,
-      body: JSON.stringify({ 
-        error: 'An internal server error occurred. Please try again later.' 
-      })
-    };
+    // === HANDLE OTHER ERRORS ===
+    console.error(`[${timestamp}] Unexpected error:`, error.message);
+    console.error(`[${timestamp}] Error stack:`, error.stack);
+    
+    return jsonResponse(500, { 
+      error: 'An unexpected error occurred. Please try again later.' 
+    }, corsHeaders);
   }
 };
