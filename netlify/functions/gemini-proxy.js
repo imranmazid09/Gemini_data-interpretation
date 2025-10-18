@@ -1,5 +1,9 @@
-// Netlify serverless function - Secure Gemini API Proxy with Enhanced Error Handling
+// Netlify serverless function - Gemini API Proxy with Batch Processing
 // Location: /netlify/functions/gemini-proxy.js
+
+const BATCH_SIZE = 25;
+const MAX_RETRIES = 2;
+const BATCH_PROCESSING_TIMEOUT = 180000; // 3 minutes for all batches
 
 const rateLimitMap = new Map();
 
@@ -55,7 +59,6 @@ function validatePayload(payload) {
   return { valid: true };
 }
 
-// Helper to return JSON responses consistently
 function jsonResponse(statusCode, body, corsHeaders = {}) {
   const defaultHeaders = {
     'Content-Type': 'application/json',
@@ -70,13 +73,244 @@ function jsonResponse(statusCode, body, corsHeaders = {}) {
   };
 }
 
+// === BATCH PROCESSING FUNCTIONS ===
+
+/**
+ * Splits CSV data into batches of 25 rows
+ * @param {string} csvText - Raw CSV text
+ * @returns {Array} Array of batch objects with headers and rows
+ */
+function createBatches(csvText) {
+  const lines = csvText.split('\n').filter(line => line.trim() !== '');
+  if (lines.length < 2) {
+    return [];
+  }
+
+  const headers = lines[0];
+  const dataRows = lines.slice(1);
+  const batches = [];
+
+  for (let i = 0; i < dataRows.length; i += BATCH_SIZE) {
+    const batchRows = dataRows.slice(i, i + BATCH_SIZE);
+    const batchData = [headers, ...batchRows].join('\n');
+    batches.push({
+      batchNumber: Math.floor(i / BATCH_SIZE) + 1,
+      rowStart: i + 1,
+      rowEnd: Math.min(i + BATCH_SIZE, dataRows.length),
+      data: batchData,
+      rowCount: batchRows.length
+    });
+  }
+
+  return batches;
+}
+
+/**
+ * Send a single batch to Gemini API
+ * @param {Object} batch - Batch object with data and metadata
+ * @param {string} apiKey - Gemini API key
+ * @param {string} context - Student's research context
+ * @returns {Promise<string>} Analysis result from Gemini
+ */
+async function processBatch(batch, apiKey, context) {
+  const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+
+  const batchPrompt = `
+You are a research data analyst. Analyze this BATCH of data rows (${batch.rowStart}-${batch.rowEnd} of a larger dataset).
+
+**Student's Research Context:**
+"${context}"
+
+**Your Task:**
+1. Summarize the KEY PATTERNS in these ${batch.rowCount} rows
+2. Identify any themes, frequencies, or notable findings
+3. Report specific metrics or counts you observe
+4. Be concise but specific - this is ONE of ${batch.batchNumber} batches
+
+Format your response as:
+- **Key Findings:** [Main patterns]
+- **Metrics:** [Any numbers/counts]
+- **Notable Items:** [Outliers or important points]
+
+=== DATA (Rows ${batch.rowStart}-${batch.rowEnd}) ===
+${batch.data}
+`;
+
+  const payload = {
+    contents: [{
+      parts: [{ text: batchPrompt }]
+    }]
+  };
+
+  let lastError;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(GEMINI_API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(30000)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        lastError = `Status ${response.status}: ${errorText}`;
+        
+        if (response.status === 429 && attempt < MAX_RETRIES) {
+          // Rate limited, wait and retry
+          await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
+          continue;
+        }
+        throw new Error(lastError);
+      }
+
+      const data = await response.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+      
+      if (!text) {
+        throw new Error('No text in Gemini response');
+      }
+
+      return text;
+
+    } catch (error) {
+      lastError = error.message;
+      if (attempt < MAX_RETRIES) {
+        // Retry with backoff
+        await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+      }
+    }
+  }
+
+  throw new Error(`Batch ${batch.batchNumber} failed after ${MAX_RETRIES + 1} attempts: ${lastError}`);
+}
+
+/**
+ * Process all batches sequentially and collect results
+ * @param {Array} batches - Array of batch objects
+ * @param {string} apiKey - Gemini API key
+ * @param {string} context - Student's research context
+ * @returns {Promise<Array>} Array of batch analysis results
+ */
+async function processBatchedData(batches, apiKey, context) {
+  console.log(`[BATCH] Starting processing of ${batches.length} batches`);
+  
+  const batchResults = [];
+  const startTime = Date.now();
+
+  for (const batch of batches) {
+    // Check timeout
+    if (Date.now() - startTime > BATCH_PROCESSING_TIMEOUT) {
+      throw new Error(`Batch processing exceeded ${BATCH_PROCESSING_TIMEOUT}ms timeout`);
+    }
+
+    try {
+      console.log(`[BATCH] Processing batch ${batch.batchNumber}/${batches.length} (rows ${batch.rowStart}-${batch.rowEnd})`);
+      
+      const result = await processBatch(batch, apiKey, context);
+      
+      batchResults.push({
+        batchNumber: batch.batchNumber,
+        rowStart: batch.rowStart,
+        rowEnd: batch.rowEnd,
+        analysis: result
+      });
+
+      console.log(`[BATCH] ✅ Batch ${batch.batchNumber} complete`);
+      
+      // Small delay between batches to avoid rate limiting
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+    } catch (error) {
+      console.error(`[BATCH] ❌ Batch ${batch.batchNumber} failed: ${error.message}`);
+      throw error;
+    }
+  }
+
+  console.log(`[BATCH] ✅ All ${batches.length} batches processed successfully`);
+  return batchResults;
+}
+
+/**
+ * Synthesize all batch results into a cohesive summary
+ * @param {Array} batchResults - Array of batch analysis results
+ * @param {string} apiKey - Gemini API key
+ * @param {string} context - Student's research context
+ * @returns {Promise<string>} Final synthesized summary
+ */
+async function synthesizeBatchResults(batchResults, apiKey, context) {
+  console.log(`[SYNTHESIS] Synthesizing ${batchResults.length} batch results`);
+  
+  const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+
+  const totalRows = batchResults.reduce((sum, b) => sum + (b.rowEnd - b.rowStart + 1), 0);
+
+  // Compile batch summaries
+  const batchSummaries = batchResults
+    .map(br => `**Batch ${br.batchNumber} (Rows ${br.rowStart}-${br.rowEnd}):**\n${br.analysis}`)
+    .join('\n\n');
+
+  const synthesisPrompt = `
+You are a research synthesis expert. You have received ${batchResults.length} batch analyses of a larger dataset (total ${totalRows} rows).
+
+**Student's Research Context:**
+"${context}"
+
+**Your Task:**
+Synthesize all these batch analyses into ONE cohesive overall summary. Your goal is to:
+
+1. **Identify overarching patterns** - What themes appear across ALL batches?
+2. **Aggregate metrics** - Combine counts/percentages from all batches into totals
+3. **Highlight key findings** - What's the main story these ${totalRows} rows tell?
+4. **Note variations** - Did any batches differ significantly from others?
+
+**Important:** Think holistically. Don't just list all batches - synthesize them into a coherent narrative.
+
+=== BATCH ANALYSES ===
+${batchSummaries}
+
+=== SYNTHESIS ===
+Provide a single, unified summary of all ${totalRows} rows analyzed across ${batchResults.length} batches:
+`;
+
+  const payload = {
+    contents: [{
+      parts: [{ text: synthesisPrompt }]
+    }]
+  };
+
+  const response = await fetch(GEMINI_API_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(30000)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error(`[SYNTHESIS] API error: ${response.status} - ${errorText}`);
+    throw new Error(`Synthesis API error: ${response.status}`);
+  }
+
+  const data = await response.json();
+  const synthesisText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  if (!synthesisText) {
+    throw new Error('No text in synthesis response');
+  }
+
+  console.log(`[SYNTHESIS] ✅ Synthesis complete`);
+  return synthesisText;
+}
+
+// === MAIN HANDLER ===
+
 exports.handler = async function (event, context) {
   context.callbackWaitsForEmptyEventLoop = false;
   
   const timestamp = new Date().toISOString();
   const rateLimitKey = getRateLimitKey(event);
 
-  // === LOGGING ===
   console.log(`[${timestamp}] Incoming request: ${event.httpMethod} from ${rateLimitKey}`);
 
   // === CORS SETUP ===
@@ -100,37 +334,32 @@ exports.handler = async function (event, context) {
 
   // === HTTP METHOD CHECK ===
   if (event.httpMethod === 'OPTIONS') {
-    console.log(`[${timestamp}] CORS preflight request`);
     return jsonResponse(200, { message: 'OK' }, corsHeaders);
   }
 
   if (event.httpMethod !== 'POST') {
-    console.warn(`[${timestamp}] Invalid method: ${event.httpMethod}`);
     return jsonResponse(405, { error: 'Method Not Allowed. Only POST requests are accepted.' }, corsHeaders);
   }
 
   // === RATE LIMITING ===
   if (!checkRateLimit(rateLimitKey, 10, 60000)) {
-    console.warn(`[${timestamp}] Rate limit exceeded for ${rateLimitKey}`);
     return jsonResponse(429, { error: 'Too many requests. Please wait before trying again.' }, corsHeaders);
   }
 
   // === REQUEST SIZE CHECK ===
   const contentLength = parseInt(event.headers['content-length'], 10);
   if (contentLength > 1024 * 1024) {
-    console.warn(`[${timestamp}] Request too large: ${contentLength} bytes`);
     return jsonResponse(413, { error: 'Request payload too large. Maximum 1MB.' }, corsHeaders);
   }
 
   // === API KEY CHECK ===
   const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
   if (!GEMINI_API_KEY) {
-    console.error(`[${timestamp}] CRITICAL: GEMINI_API_KEY environment variable not set!`);
+    console.error(`[${timestamp}] CRITICAL: GEMINI_API_KEY not configured`);
     return jsonResponse(500, { 
-      error: 'Server configuration error: API key not found. Please check Netlify environment variables.' 
+      error: 'Server configuration error. Please check Netlify environment variables.' 
     }, corsHeaders);
   }
-  console.log(`[${timestamp}] API key found (length: ${GEMINI_API_KEY.length})`);
 
   // === REQUEST PROCESSING ===
   try {
@@ -138,103 +367,67 @@ exports.handler = async function (event, context) {
     let payload;
     try {
       payload = JSON.parse(event.body);
-      console.log(`[${timestamp}] Payload parsed successfully`);
     } catch (parseError) {
-      console.error(`[${timestamp}] JSON parse error:`, parseError.message);
+      console.error(`[${timestamp}] JSON parse error: ${parseError.message}`);
       return jsonResponse(400, { error: 'Invalid JSON in request body' }, corsHeaders);
     }
 
     // Validate payload
     const validation = validatePayload(payload);
     if (!validation.valid) {
-      console.warn(`[${timestamp}] Payload validation failed: ${validation.error}`);
+      console.warn(`[${timestamp}] Validation failed: ${validation.error}`);
       return jsonResponse(400, { error: validation.error }, corsHeaders);
     }
-    console.log(`[${timestamp}] Payload validation passed`);
 
-    // === CALL GEMINI API ===
-    const GEMINI_API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${GEMINI_API_KEY}`;
+    // Extract data from payload
+    const csvText = payload.contents?.[0]?.parts?.[0]?.text || '';
+    const context = payload.context || 'No context provided';
+
+    if (!csvText) {
+      return jsonResponse(400, { error: 'No CSV data provided in request' }, corsHeaders);
+    }
+
+    console.log(`[${timestamp}] CSV data received. Preparing batches...`);
+
+    // === CREATE BATCHES ===
+    const batches = createBatches(csvText);
     
-    console.log(`[${timestamp}] Calling Gemini API...`);
-    
-    const geminiResponse = await fetch(GEMINI_API_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(30000)
-    });
-
-    console.log(`[${timestamp}] Gemini response status: ${geminiResponse.status}`);
-
-    // === HANDLE GEMINI ERROR ===
-    if (!geminiResponse.ok) {
-      let errorBody = '';
-      try {
-        errorBody = await geminiResponse.text();
-        console.error(`[${timestamp}] Gemini API error response:`, errorBody);
-      } catch (e) {
-        console.error(`[${timestamp}] Could not read error response body`);
-      }
-
-      let userMessage = 'An error occurred while processing your request.';
-      
-      if (geminiResponse.status === 400) {
-        userMessage = 'Invalid request format. Please check your input.';
-      } else if (geminiResponse.status === 401 || geminiResponse.status === 403) {
-        userMessage = 'Authentication failed. Please verify your API key and try again.';
-      } else if (geminiResponse.status === 429) {
-        userMessage = 'Gemini API rate limit exceeded. Please wait a moment and try again.';
-      } else if (geminiResponse.status === 500) {
-        userMessage = 'Gemini API is experiencing issues. Please try again later.';
-      }
-
-      console.error(`[${timestamp}] Returning error to client: ${userMessage}`);
-      return jsonResponse(
-        geminiResponse.status >= 500 ? 503 : geminiResponse.status,
-        { error: userMessage },
-        corsHeaders
-      );
+    if (batches.length === 0) {
+      return jsonResponse(400, { error: 'No valid data rows found in CSV' }, corsHeaders);
     }
 
-    // === PARSE GEMINI RESPONSE ===
-    let data;
-    try {
-      data = await geminiResponse.json();
-      console.log(`[${timestamp}] Gemini response parsed successfully`);
-    } catch (parseError) {
-      console.error(`[${timestamp}] Failed to parse Gemini response:`, parseError.message);
-      return jsonResponse(502, { 
-        error: 'Failed to parse Gemini response. The API may be experiencing issues.' 
-      }, corsHeaders);
-    }
+    console.log(`[${timestamp}] Created ${batches.length} batches of up to ${BATCH_SIZE} rows each`);
 
-    // === VALIDATE GEMINI RESPONSE ===
-    if (!data.candidates || !Array.isArray(data.candidates) || data.candidates.length === 0) {
-      console.error(`[${timestamp}] Gemini returned no candidates:`, JSON.stringify(data).substring(0, 200));
-      return jsonResponse(502, { 
-        error: 'Gemini API returned an empty response. Please try again.' 
-      }, corsHeaders);
-    }
+    // === PROCESS BATCHES ===
+    const batchResults = await processBatchedData(batches, GEMINI_API_KEY, context);
 
-    console.log(`[${timestamp}] Success! Returning response with ${data.candidates.length} candidate(s)`);
+    // === SYNTHESIZE RESULTS ===
+    const finalSynthesis = await synthesizeBatchResults(batchResults, GEMINI_API_KEY, context);
 
-    return jsonResponse(200, data, corsHeaders);
+    console.log(`[${timestamp}] ✅ Batch processing complete. Returning synthesis.`);
+
+    return jsonResponse(200, {
+      success: true,
+      batchCount: batches.length,
+      totalRowsProcessed: batches.reduce((sum, b) => sum + b.rowCount, 0),
+      synthesis: finalSynthesis,
+      batchSummary: batchResults.map(br => ({
+        batchNumber: br.batchNumber,
+        rows: `${br.rowStart}-${br.rowEnd}`,
+        preview: br.analysis.substring(0, 100) + '...'
+      }))
+    }, corsHeaders);
 
   } catch (error) {
-    // === HANDLE TIMEOUT ===
-    if (error.name === 'AbortError') {
-      console.error(`[${timestamp}] Request timeout (30s exceeded)`);
-      return jsonResponse(504, { 
-        error: 'Request timeout. The API took too long to respond. Please try again.' 
-      }, corsHeaders);
+    console.error(`[${timestamp}] Error: ${error.message}`);
+    console.error(`[${timestamp}] Stack: ${error.stack}`);
+
+    if (error.message.includes('timeout')) {
+      return jsonResponse(504, { error: 'Processing timeout. Dataset may be too large.' }, corsHeaders);
     }
 
-    // === HANDLE OTHER ERRORS ===
-    console.error(`[${timestamp}] Unexpected error:`, error.message);
-    console.error(`[${timestamp}] Error stack:`, error.stack);
-    
     return jsonResponse(500, { 
-      error: 'An unexpected error occurred. Please try again later.' 
+      error: error.message || 'An unexpected error occurred' 
     }, corsHeaders);
   }
 };
