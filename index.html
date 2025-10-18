@@ -233,7 +233,7 @@
                 { id: 4, name: "Develop Strategy", completed: false },
                 { id: 5, name: "Export Report", completed: false },
             ],
-            uploadedFiles: [],
+            uploadedFiles: [], // objects like { name, type, size, chunks: [], rowCount: null, analysis: null, isAnalyzing: false, analysisProgress: "", batchMetadata: null }
             userContext: "",
             synthesisResult: null,
             insights: [],
@@ -344,6 +344,11 @@
                     ${file.analysis ? `
                         <div class="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-md text-gray-800 text-sm">
                            ${file.analysis.replace(/\n/g, '<br>')}
+                           ${file.batchMetadata ? `
+                               <div class="mt-3 pt-3 border-t border-blue-200 text-xs text-gray-600">
+                                   <strong>Batch Processing Info:</strong> ${file.batchMetadata.batchCount} batches, ${file.batchMetadata.totalRowsProcessed} rows total
+                               </div>
+                           ` : ''}
                         </div>
                     ` : ''}
                 </div>
@@ -541,7 +546,8 @@
                         rowCount: null,
                         analysis: null,
                         isAnalyzing: false,
-                        analysisProgress: ""
+                        analysisProgress: "",
+                        batchMetadata: null
                     };
 
                     if (file.type.startsWith('image/')) {
@@ -582,11 +588,18 @@
                 });
                 
                 if (!response.ok) {
-                    const errorData = await response.json();
+                    const errorData = await response.json().catch(() => ({}));
                     throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
                 }
                 
                 const result = await response.json();
+                
+                // Handle batch processing response format
+                if (result.success && result.synthesis) {
+                    return result; // Return entire batch result object
+                }
+                
+                // Handle regular Gemini response format
                 const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
                 if (text) return text;
                 
@@ -597,7 +610,7 @@
                 throw new Error("Invalid API response structure.");
             } catch (error) {
                 console.error("API Call failed:", error.message);
-                return `Error: Unable to get a response from the AI. ${error.message}`;
+                return `Error: ${error.message}`;
             }
         }
 
@@ -606,37 +619,119 @@
             if (!file || file.isAnalyzing) return;
 
             file.isAnalyzing = true;
-            file.analysisProgress = "Analyzing...";
+            file.analysisProgress = "Preparing data...";
             render();
 
-            const summarizationPrompt = `
-                You are an expert research assistant helping a student understand their EXISTING analysis results.
-                
-                **IMPORTANT:** DO NOT perform a new analysis. Only summarize what's in the file.
-                
-                **Student's Research Context:**
-                "${appState.userContext || 'No context provided.'}"
-                
-                **Your Task:**
-                1. Identify the type of analysis (Topic Model, Sentiment Analysis, SPSS output, etc.)
-                2. List key findings, metrics, and numbers AS THEY APPEAR in the file
-                3. Organize findings clearly and concisely
-                
-                Be objective and factual. Do not interpret or make claims beyond what's in the file.
-            `;
-            
-            const parts = [
-                { text: summarizationPrompt },
-                { inline_data: { mime_type: file.type || 'application/octet-stream', data: file.base64 } }
-            ];
+            try {
+                // === FOR CSV FILES: Use Batch Processing ===
+                if (file.type === 'text/csv' || file.name.endsWith('.csv')) {
+                    const csvText = atob(file.base64); // Decode base64 to text
+                    
+                    // Send to batch processing endpoint
+                    const batchPayload = {
+                        contents: [{
+                            parts: [{ text: csvText }]
+                        }],
+                        context: appState.userContext || 'No context provided'
+                    };
 
-            const payload = { contents: [{ parts }] };
-            const result = await callGeminiAPI(payload);
+                    file.analysisProgress = "Analyzing batches...";
+                    render();
 
-            file.analysis = result;
-            file.isAnalyzing = false;
-            file.analysisProgress = "";
-            render();
+                    const batchResponse = await callGeminiAPI(batchPayload);
+                    
+                    // Parse batch response
+                    let batchResult;
+                    try {
+                        // If response is already an object, use it; if string, parse it
+                        batchResult = typeof batchResponse === 'string' ? JSON.parse(batchResponse) : batchResponse;
+                    } catch (e) {
+                        batchResult = { synthesis: batchResponse };
+                    }
+
+                    // Store metadata for display
+                    file.batchMetadata = {
+                        batchCount: batchResult.batchCount || 1,
+                        totalRowsProcessed: batchResult.totalRowsProcessed || file.rowCount,
+                        batchSummary: batchResult.batchSummary || []
+                    };
+
+                    file.analysis = `
+**📊 Batch Processing Summary:**
+- Batches processed: ${batchResult.batchCount || 1}
+- Total rows analyzed: ${batchResult.totalRowsProcessed || file.rowCount}
+
+**Synthesis across all batches:**
+${batchResult.synthesis || batchResponse}
+                    `;
+                }
+                // === FOR IMAGE FILES: Use Direct Analysis ===
+                else if (file.type.startsWith('image/')) {
+                    const summarizationPrompt = `
+                        You are an expert research assistant. Analyze this data visualization image.
+                        
+                        **Student's Research Context:**
+                        "${appState.userContext || 'No context provided.'}"
+                        
+                        **Your Task:**
+                        1. Identify what type of visualization this is (chart, graph, table, etc.)
+                        2. Summarize the key data points and findings shown
+                        3. List any metrics, percentages, or important numbers visible
+                        4. Note the overall story or message of the visualization
+                        
+                        Be objective and factual.
+                    `;
+                    
+                    const parts = [
+                        { text: summarizationPrompt },
+                        { inline_data: { mime_type: file.type, data: file.base64 } }
+                    ];
+
+                    file.analysisProgress = "Analyzing image...";
+                    render();
+
+                    const payload = { contents: [{ parts }] };
+                    const result = await callGeminiAPI(payload);
+                    file.analysis = result;
+                }
+                // === FOR OTHER FILES: Send as base64 ===
+                else {
+                    const summarizationPrompt = `
+                        You are an expert research assistant helping a student understand their analysis results.
+                        
+                        **Student's Research Context:**
+                        "${appState.userContext || 'No context provided.'}"
+                        
+                        **Your Task:**
+                        1. Identify the type of analysis output this is
+                        2. Summarize key findings and metrics
+                        3. Be factual and objective
+                    `;
+                    
+                    const parts = [
+                        { text: summarizationPrompt },
+                        { inline_data: { mime_type: file.type || 'application/octet-stream', data: file.base64 } }
+                    ];
+
+                    file.analysisProgress = "Analyzing file...";
+                    render();
+
+                    const payload = { contents: [{ parts }] };
+                    const result = await callGeminiAPI(payload);
+                    file.analysis = result;
+                }
+
+                file.isAnalyzing = false;
+                file.analysisProgress = "";
+                render();
+
+            } catch (error) {
+                console.error("Error summarizing file:", error);
+                file.analysis = `❌ Error: ${error.message}. Please try again.`;
+                file.isAnalyzing = false;
+                file.analysisProgress = "";
+                render();
+            }
         }
 
         async function handleInterpretFindings() {
@@ -650,10 +745,21 @@
             appState.currentStage = 2;
             render();
 
-            let fileSummaries = "SUMMARY OF STUDENT'S ANALYSIS RESULTS:\n";
+            let fileSummaries = "SUMMARY OF STUDENT'S ANALYSIS RESULTS:\n\n";
+            let totalBatches = 0;
+            let totalRows = 0;
+
             appState.uploadedFiles.forEach(file => {
                 if(file.analysis) {
-                    fileSummaries += `--- ${file.name} ---\n${file.analysis}\n\n`;
+                    fileSummaries += `--- ${file.name} ---\n`;
+                    
+                    if (file.batchMetadata) {
+                        fileSummaries += `📊 Processed in ${file.batchMetadata.batchCount} batches (${file.batchMetadata.totalRowsProcessed} total rows)\n`;
+                        totalBatches += file.batchMetadata.batchCount;
+                        totalRows += file.batchMetadata.totalRowsProcessed;
+                    }
+                    
+                    fileSummaries += `${file.analysis}\n\n`;
                 }
             });
 
@@ -664,6 +770,7 @@
                 ${appState.userContext}
                 
                 **Factual Summary of Results:**
+                (Processed across ${totalBatches} batches, ${totalRows} total rows analyzed)
                 ${fileSummaries}
                 
                 **Your Task:**
