@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI-Powered Data Interpretation Tool</title>
+    <title>Dr. Imran Mazid’s Insight Lab</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -577,24 +577,113 @@
             }
         }
         
+        // Function to get a specialized analysis prompt based on the identified data type
+        function getSpecializedAnalysisPrompt(analysisType, file) {
+            const prompts = {
+                'SENTIMENT_ANALYSIS': {
+                    synthesis: `
+                        You are an expert data analysis tutor. You have been provided with multiple summaries from sequential batches of a single data file containing exactly ${file.rowCount} entries. Your task is to synthesize these summaries into a single, cohesive analysis of the entire file.
+
+                        BATCH SUMMARIES:
+                        {CHUNK_SUMMARIES}
+
+                        SYNTHESIS TASK:
+                        1.  **Mandatory First Sentence:** Start your response with: "This file contains exactly ${file.rowCount} data entries."
+                        2.  **Thematic Analysis:** Based on all the batch summaries, identify the top 3-5 overarching themes found in the complete dataset.
+                        3.  **Quantitative Sentiment Breakdown:** Look through the batch summaries for sentiment counts. Aggregate these counts to provide a final tally for the entire dataset. Present this clearly, for example:
+                            - Positive: [Number] posts (XX.X%)
+                            - Negative: [Number] posts (XX.X%)
+                            - Neutral: [Number] posts (XX.X%)
+                        4.  **Qualitative Sentiment Summary:** Briefly describe the overall sentiment.
+                        5.  Keep the final synthesized response under 250 words.`,
+                    chunk: `You are an AI data analyst. This is a batch from a larger dataset. Briefly summarize the primary themes and overall sentiment of ONLY the data in this batch. If a sentiment column exists, count the number of positive, negative, and neutral entries in this batch.`
+                },
+                'TOPIC_MODELING': {
+                    synthesis: `
+                        You are an expert data analysis tutor specializing in topic modeling. You have been provided with summaries from sequential batches of a topic modeling output file containing exactly ${file.rowCount} topics. Your task is to synthesize these into a single, cohesive analysis.
+
+                        BATCH SUMMARIES:
+                        {CHUNK_SUMMARIES}
+
+                        SYNTHESIS TASK:
+                        1.  **Mandatory First Sentence:** Start your response with: "This file contains a topic model with exactly ${file.rowCount} topics."
+                        2.  **Identify Key Topics:** Based on all the batch summaries, list the most prevalent topics. For each topic, provide a clear, descriptive label.
+                        3.  **Topic Distribution:** If the data includes topic prevalence or distribution percentages, summarize this information.
+                        4.  **Key Differentiators:** Briefly explain what distinguishes the main topics from each other.
+                        5.  Keep the final synthesized response under 250 words.`,
+                    chunk: `You are an AI data analyst specializing in topic modeling. This is a batch from a topic modeling output file. For ONLY the data in this batch, identify the topic names or numbers, their top keywords, and any prevalence scores.`
+                },
+                'VISUALIZATION': {
+                    synthesis: null, // No synthesis for single images
+                    chunk: `
+                        SYSTEM ROLE: You are an expert data analysis tutor. Your task is to analyze ONLY the single file provided, which is a visualization.
+                        
+                        **ANALYSIS GUIDELINES:**
+                        1.  Identify the type of visualization (e.g., Word Cloud, Bar Chart, Network Graph). For Word Clouds, classify it as a **Quantitative Word Frequency Visualization**.
+                        2.  Describe its main takeaway or the most prominent features.
+                        
+                        Your response should be a concise summary (under 150 words).`
+                },
+                'UNKNOWN': {
+                     synthesis: `
+                        You are an expert data analysis tutor. You have been provided with multiple summaries from sequential batches of a single data file containing exactly ${file.rowCount} entries. Your task is to synthesize these summaries into a single, cohesive analysis of the entire file.
+
+                        BATCH SUMMARIES:
+                        {CHUNK_SUMMARIES}
+
+                        SYNTHESIS TASK:
+                        1.  **Mandatory First Sentence:** Start your response with: "This file contains exactly ${file.rowCount} data entries."
+                        2.  **Thematic Analysis:** Based on all the batch summaries, identify the top 3-5 overarching themes found in the complete dataset.
+                        3.  **Summarize Key Data Points:** Identify any recurring quantitative data or key metrics.
+                        4.  Keep the final synthesized response under 250 words.`,
+                    chunk: `You are an AI data analyst. This is a batch from a larger dataset. Briefly summarize the primary themes and key data points of ONLY the data in this batch.`
+                }
+            };
+            return prompts[analysisType] || prompts['UNKNOWN'];
+        }
+
         async function handleAnalyzeSingleFile(index) {
             const file = appState.uploadedFiles[index];
             if (!file || file.isAnalyzing) return;
 
             file.isAnalyzing = true;
+            file.analysisProgress = "Identifying...";
+            render();
+
+            // --- Step 1: Identify the Analysis Type, prioritizing user context ---
+            let analysisType = 'UNKNOWN';
+            if (file.type.startsWith('image/')) {
+                analysisType = 'VISUALIZATION';
+            } else if (file.rowCount !== null) {
+                const identificationPrompt = `
+                    A researcher has provided the following context for their analysis: "${appState.userContext || 'No context provided.'}"
+
+                    They have also provided a data file with these headers and first two rows:
+                    ${atob(file.chunks[0]).split('\n').slice(0, 3).join('\n')}
+
+                    Based on BOTH the researcher's context and the data sample, which methodological framework is most appropriate?
+                    Respond with ONLY one of the following labels: SENTIMENT_ANALYSIS, TOPIC_MODELING, or UNKNOWN. Prioritize the researcher's explicit context.
+                `;
+                const payload = { contents: [{ parts: [{ text: identificationPrompt }] }] };
+                const typeResponse = await callGeminiAPI(payload);
+                if (typeResponse && (typeResponse.includes('SENTIMENT_ANALYSIS') || typeResponse.includes('TOPIC_MODELING'))) {
+                    analysisType = typeResponse.trim().replace(/[^A-Z_]/g, ''); // Sanitize the response
+                }
+            }
+            
+            // --- Step 2: Perform Specialized Analysis ---
+            const prompts = getSpecializedAnalysisPrompt(analysisType, file);
             const totalChunks = file.chunks.length;
             let chunkSummaries = [];
 
-            // Case 1: Methodical Chunk-by-Chunk Analysis for large CSVs
-            if (totalChunks > 1) {
+            if (totalChunks > 1) { // Methodical Chunk-by-Chunk Analysis
                 for (let i = 0; i < totalChunks; i++) {
                     const processedRows = (i + 1) * CHUNK_SIZE;
                     file.analysisProgress = `Analyzing ${Math.min(processedRows, file.rowCount)}/${file.rowCount}...`;
-                    render(); // Update UI with progress
+                    render();
 
-                    const chunkPrompt = `You are an AI data analyst. This is batch ${i + 1} of ${totalChunks} from a larger dataset. Briefly summarize the primary themes and overall sentiment of ONLY the data in this batch. If a sentiment column exists, count the number of positive, negative, and neutral entries in this batch.`;
                     const parts = [
-                        { text: chunkPrompt },
+                        { text: prompts.chunk },
                         { inline_data: { mime_type: 'text/csv', data: file.chunks[i] } }
                     ];
                     const payload = { contents: [{ parts }] };
@@ -602,61 +691,17 @@
                     chunkSummaries.push(`Summary of Batch ${i+1}: ${summary}`);
                 }
 
-                // Final Synthesis of all chunks
                 file.analysisProgress = `Synthesizing...`;
                 render();
-                const synthesisPrompt = `
-                    You are an expert data analysis tutor. You have been provided with ${totalChunks} summaries from sequential batches of a single data file containing exactly ${file.rowCount} entries. Your task is to synthesize these summaries into a single, cohesive analysis of the entire file.
-
-                    BATCH SUMMARIES:
-                    ${chunkSummaries.join('\n\n')}
-
-                    SYNTHESIS TASK:
-                    1.  **Mandatory First Sentence:** Start your response with: "This file contains exactly ${file.rowCount} data entries."
-                    2.  **Thematic Analysis:** Based on all the batch summaries, identify the top 3-5 overarching themes found in the complete dataset.
-                    3.  **Quantitative Sentiment Breakdown:** Look through the batch summaries for sentiment counts. Aggregate these counts to provide a final tally for the entire dataset. Present this clearly, for example:
-                        - Positive: [Number] posts (XX.X%)
-                        - Negative: [Number] posts (XX.X%)
-                        - Neutral: [Number] posts (XX.X%)
-                    4.  **Qualitative Sentiment Summary:** Briefly describe the overall sentiment.
-                    5.  Keep the final synthesized response under 250 words.
-                `;
+                const synthesisPrompt = prompts.synthesis.replace('{CHUNK_SUMMARIES}', chunkSummaries.join('\n\n'));
                 const payload = { contents: [{ parts: [{ text: synthesisPrompt }] }] };
                 file.analysis = await callGeminiAPI(payload);
-            } 
-            // Case 2: Standard Analysis for smaller or non-CSV files
-            else {
+
+            } else { // Standard Analysis for small or non-chunked files
                 file.analysisProgress = `Analyzing...`;
                 render();
-                let textPrompt;
-                if (file.rowCount !== null) {
-                    textPrompt = `
-                        SYSTEM ROLE: You are an expert data analysis tutor. Your task is to analyze ONLY the single file provided.
-                        
-                        **CRITICAL FACT:** This file contains exactly **${file.rowCount}** data entries. This has been programmatically verified.
-                        
-                        **ANALYSIS GUIDELINES:**
-                        1.  **Mandatory First Sentence:** Start your response with: "This file contains exactly ${file.rowCount} data entries."
-                        2.  **Thematic Analysis:** Briefly summarize the main themes or topics present in the data.
-                        3.  **Quantitative Sentiment Breakdown:** If a sentiment column exists, count the number of positive, negative, and neutral entries. Present this clearly, for example:
-                            - Positive: [Number] posts (XX.X%)
-                            - Negative: [Number] posts (XX.X%)
-                            - Neutral: [Number] posts (XX.X%)
-                        4.  **Qualitative Sentiment Summary:** Briefly describe the overall sentiment.
-                        Your entire response should be a concise summary (under 150 words).`;
-                } else { // Fallback for images
-                    textPrompt = `
-                        SYSTEM ROLE: You are an expert data analysis tutor. Your task is to analyze ONLY the single file provided, which is a visualization.
-                        
-                        **ANALYSIS GUIDELINES:**
-                        1.  Identify the type of visualization (e.g., Word Cloud, Bar Chart). For Word Clouds, classify it as a **Quantitative Word Frequency Visualization**.
-                        2.  Describe its main takeaway or the most prominent features.
-                        
-                        Your response should be a concise summary (under 150 words).`;
-                }
-
                 const parts = [
-                    { text: textPrompt },
+                    { text: prompts.chunk },
                     { inline_data: { mime_type: file.type || 'application/octet-stream', data: file.chunks[0] } }
                 ];
                 const payload = { contents: [{ parts }] };
@@ -698,11 +743,11 @@
                 - Synthesize the individual analyses to describe the project as a whole. How do the different files fit together?
 
                 SECTION 2: PRIMARY FINDINGS (Data-Grounded)
-                - List 5-7 key findings that emerge from looking at ALL the data together. 
+                - List 3-5 key findings that emerge from looking at ALL the data together. 
                 - Each finding must be a headline, cite which file(s) the evidence comes from, and interpret it in the context of the student's campaign.
 
                 SECTION 3: CONTEXT CONNECTION
-                - Connect at least 3 findings directly to the student's stated goals, target audience, or research questions.
+                - Connect at least 2 findings directly to the student's stated goals, target audience, or research questions.
 
                 SECTION 4: UNDERSTANDING CHECK
                 - Ask ONE insightful question that tests the student's understanding of the synthesized findings.
