@@ -3,7 +3,7 @@
 
 const BATCH_SIZE = 25;
 const MAX_RETRIES = 2;
-const BATCH_PROCESSING_TIMEOUT = 180000; // 3 minutes for all batches
+const BATCH_PROCESSING_TIMEOUT = 55000; // 55 seconds for all batches (Netlify limit ~60s)
 
 const rateLimitMap = new Map();
 
@@ -81,18 +81,31 @@ function jsonResponse(statusCode, body, corsHeaders = {}) {
  * @returns {Array} Array of batch objects with headers and rows
  */
 function createBatches(csvText) {
-  const lines = csvText.split('\n').filter(line => line.trim() !== '');
+  // Normalize line endings (handle \r\n, \r, \n)
+  const normalized = csvText.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  
+  // Split and filter empty lines
+  const lines = normalized.split('\n').filter(line => line.trim() !== '');
+  
+  console.log(`[BATCH_PARSE] Total lines after split: ${lines.length}`);
+  
   if (lines.length < 2) {
+    console.error(`[BATCH_PARSE] Not enough lines (need at least 2: header + 1 data row). Got ${lines.length}`);
     return [];
   }
 
   const headers = lines[0];
   const dataRows = lines.slice(1);
+  
+  console.log(`[BATCH_PARSE] Headers: ${headers.substring(0, 50)}...`);
+  console.log(`[BATCH_PARSE] Data rows: ${dataRows.length}`);
+  
   const batches = [];
 
   for (let i = 0; i < dataRows.length; i += BATCH_SIZE) {
     const batchRows = dataRows.slice(i, i + BATCH_SIZE);
     const batchData = [headers, ...batchRows].join('\n');
+    
     batches.push({
       batchNumber: Math.floor(i / BATCH_SIZE) + 1,
       rowStart: i + 1,
@@ -102,6 +115,7 @@ function createBatches(csvText) {
     });
   }
 
+  console.log(`[BATCH_PARSE] Created ${batches.length} batches from ${dataRows.length} rows`);
   return batches;
 }
 
@@ -125,7 +139,7 @@ You are a research data analyst. Analyze this BATCH of data rows (${batch.rowSta
 1. Summarize the KEY PATTERNS in these ${batch.rowCount} rows
 2. Identify any themes, frequencies, or notable findings
 3. Report specific metrics or counts you observe
-4. Be concise but specific - this is ONE of ${batch.batchNumber} batches
+4. Be concise but specific - this is ONE of many batches
 
 Format your response as:
 - **Key Findings:** [Main patterns]
@@ -145,20 +159,28 @@ ${batch.data}
   let lastError;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
+      console.log(`[BATCH_API] Batch ${batch.batchNumber}: API call attempt ${attempt + 1}`);
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 45000); // 45 sec per batch (vs 30)
+      
       const response = await fetch(GEMINI_API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(30000)
+        signal: controller.signal
       });
+      
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         const errorText = await response.text();
-        lastError = `Status ${response.status}: ${errorText}`;
+        console.error(`[BATCH_API] Batch ${batch.batchNumber}: HTTP ${response.status}`);
+        lastError = `Status ${response.status}`;
         
         if (response.status === 429 && attempt < MAX_RETRIES) {
-          // Rate limited, wait and retry
-          await new Promise(resolve => setTimeout(resolve, 2000 * (attempt + 1)));
+          console.warn(`[BATCH_API] Rate limited, retrying batch ${batch.batchNumber}`);
+          await new Promise(resolve => setTimeout(resolve, 3000 * (attempt + 1)));
           continue;
         }
         throw new Error(lastError);
@@ -168,21 +190,27 @@ ${batch.data}
       const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
       
       if (!text) {
+        console.error(`[BATCH_API] Batch ${batch.batchNumber}: No text in response`);
         throw new Error('No text in Gemini response');
       }
 
+      console.log(`[BATCH_API] Batch ${batch.batchNumber}: Success (${text.length} chars)`);
       return text;
 
     } catch (error) {
       lastError = error.message;
+      console.error(`[BATCH_API] Batch ${batch.batchNumber}: Attempt ${attempt + 1} failed - ${lastError}`);
+      
       if (attempt < MAX_RETRIES) {
-        // Retry with backoff
-        await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+        const waitTime = 1500 * (attempt + 1);
+        console.log(`[BATCH_API] Retrying batch ${batch.batchNumber} in ${waitTime}ms`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
       }
     }
   }
 
-  throw new Error(`Batch ${batch.batchNumber} failed after ${MAX_RETRIES + 1} attempts: ${lastError}`);
+  console.error(`[BATCH_API] Batch ${batch.batchNumber}: FAILED after ${MAX_RETRIES + 1} attempts`);
+  throw new Error(`Batch ${batch.batchNumber} failed: ${lastError}`);
 }
 
 /**
@@ -387,16 +415,19 @@ exports.handler = async function (event, context) {
       return jsonResponse(400, { error: 'No CSV data provided in request' }, corsHeaders);
     }
 
-    console.log(`[${timestamp}] CSV data received. Preparing batches...`);
+    console.log(`[${timestamp}] CSV data received. Length: ${csvText.length} chars`);
+    console.log(`[${timestamp}] CSV first 300 chars:\n${csvText.substring(0, 300)}`);
 
     // === CREATE BATCHES ===
     const batches = createBatches(csvText);
     
     if (batches.length === 0) {
-      return jsonResponse(400, { error: 'No valid data rows found in CSV' }, corsHeaders);
+      console.error(`[${timestamp}] No batches created. CSV parsing failed.`);
+      return jsonResponse(400, { error: 'No valid data rows found in CSV. Check CSV format.' }, corsHeaders);
     }
 
-    console.log(`[${timestamp}] Created ${batches.length} batches of up to ${BATCH_SIZE} rows each`);
+    console.log(`[${timestamp}] ✅ Created ${batches.length} batches`);
+    batches.forEach(b => console.log(`[${timestamp}] - Batch ${b.batchNumber}: rows ${b.rowStart}-${b.rowEnd} (${b.rowCount} rows)`));
 
     // === PROCESS BATCHES ===
     const batchResults = await processBatchedData(batches, GEMINI_API_KEY, context);
