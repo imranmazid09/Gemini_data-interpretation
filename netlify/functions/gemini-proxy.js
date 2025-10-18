@@ -1,7 +1,7 @@
 // Netlify serverless function - Gemini API Proxy with Batch Processing
 // Location: /netlify/functions/gemini-proxy.js
 
-const BATCH_SIZE = 25;
+const BATCH_SIZE = 50; // Increased from 25 to handle larger datasets
 const MAX_RETRIES = 2;
 const BATCH_PROCESSING_TIMEOUT = 55000; // 55 seconds for all batches (Netlify limit ~60s)
 
