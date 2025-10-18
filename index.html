@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI-Powered Data Interpretation Tool</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f4f8; /* Light blue-gray background */
+        }
+        .main-container {
+            display: grid;
+            grid-template-columns: 320px 1fr;
+            height: 100vh;
+        }
+        .sidebar {
+            background: linear-gradient(180deg, #1e3a8a 0%, #1c3d91 100%); /* Deep blue gradient */
+            color: white;
+            padding: 2rem;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 2px 0 10px rgba(0,0,0,0.1);
+        }
+        .content-area {
+            padding: 3rem;
+            overflow-y: auto;
+            background-color: #ffffff;
+        }
+        .stage-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            opacity: 0.5;
+            transition: all 0.3s ease;
+            cursor: default;
+        }
+        .stage-item.active {
+            opacity: 1;
+            font-weight: 700;
+        }
+        .stage-item.completed {
+            opacity: 0.8;
+            cursor: pointer;
+        }
+        .stage-number {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            border: 2px solid white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 1rem;
+            transition: all 0.3s ease;
+        }
+        .stage-item.active .stage-number {
+            background-color: #3b82f6; /* Bright blue for active */
+            border-color: #3b82f6;
+        }
+        .stage-item.completed .stage-number {
+            background-color: #16a34a; /* Green for completed */
+            border-color: #16a34a;
+        }
+
+        .ai-helper {
+            margin-top: auto;
+            border-top: 1px solid rgba(255,255,255,0.2);
+            padding-top: 1.5rem;
+        }
+        .chat-box {
+            height: 150px;
+            overflow-y: auto;
+            margin-bottom: 1rem;
+            font-size: 0.875rem;
+        }
+        .chat-message {
+            margin-bottom: 0.5rem;
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.5rem;
+        }
+        .user-message {
+            background-color: #3b82f6;
+            text-align: right;
+            margin-left: 2rem;
+        }
+        .ai-message {
+            background-color: #2b4f9a;
+            margin-right: 2rem;
+        }
+
+        .drop-zone {
+            border: 2px dashed #d1d5db;
+            border-radius: 0.75rem;
+            padding: 2.5rem;
+            text-align: center;
+            transition: all 0.3s ease;
+            background-color: #f9fafb;
+        }
+        .drop-zone.dragover {
+            border-color: #3b82f6;
+            background-color: #eff6ff;
+        }
+
+        .btn-primary {
+            background: linear-gradient(to right, #3b82f6, #60a5fa);
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.5rem;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 6px rgba(59, 130, 246, 0.2);
+        }
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 7px 10px rgba(59, 130, 246, 0.3);
+        }
+        .btn-primary:disabled {
+            background: #9ca3af;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        .btn-secondary {
+            background-color: #e5e7eb;
+            color: #374151;
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            font-weight: 500;
+            transition: background-color 0.3s ease;
+        }
+        .btn-secondary:hover {
+            background-color: #d1d5db;
+        }
+        .btn-secondary:disabled {
+             background-color: #e5e7eb;
+             opacity: 0.5;
+             cursor: not-allowed;
+        }
+
+        /* Scrollbar styles */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+    </style>
+</head>
+<body>
+    <div class="main-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="flex items-center mb-12">
+                 <div class="p-2 bg-white rounded-lg mr-4">
+                    <svg class="w-8 h-8 text-[#1e3a8a]" viewBox="0 0 24 24" fill="currentColor"><path d="M12.38 2.52a1 1 0 00-1.1-1.48C5.23 2.56 2 7.51 2 12a1 1 0 002 0c0-3.53 2.5-7.05 7.82-8.35a1 1 0 00.56-1.13zm8.24 10.53a1 1 0 00-1-1.73c-4.43-1.48-6.93-5.22-7.86-8.2a1 1 0 00-1.88.66c1.01 3.28 3.89 7.72 9.2 9.38a1 1 0 001.54-1.1zM11.62 21.48a1 1 0 001.1 1.48c6.05-1.52 9.28-6.47 9.28-11a1 1 0 00-2 0c0 3.53-2.5-7.05-7.82-8.35a1 1 0 00-.56 1.17z"/></svg>
+                </div>
+                <h1 class="text-xl font-bold">Dr. Imran Mazid’s Insight Lab</h1>
+            </div>
+
+            <!-- Stages -->
+            <nav id="stage-navigation">
+                <!-- Stages will be dynamically generated here -->
+            </nav>
+
+            <!-- AI Helper -->
+            <div class="ai-helper">
+                <h3 class="text-lg font-semibold mb-2">AI Helper</h3>
+                <div id="chat-box" class="chat-box p-2 bg-black bg-opacity-20 rounded-lg">
+                    <div class="ai-message chat-message">
+                        Welcome! I'm here to help you at any stage.
+                    </div>
+                </div>
+                <div class="relative">
+                    <input type="text" id="ai-helper-input" placeholder="Ask a question..." class="w-full bg-black bg-opacity-20 border border-transparent focus:border-blue-400 rounded-lg p-2 pr-10 text-white placeholder-gray-400 focus:outline-none">
+                    <button id="ai-helper-send" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-300 hover:text-white">
+                        <i class="fas fa-paper-plane"></i>
+                    </button>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main id="content-area" class="content-area">
+            <!-- Content for each stage will be dynamically rendered here -->
+        </main>
+    </div>
+
+    <script type="module">
+        // This is a comprehensive script for the entire application.
+        // It manages state, UI rendering, file handling, and API communication.
+        
+        const CHUNK_SIZE = 25; // Set the number of rows per batch for analysis
+
+        // --- STATE MANAGEMENT ---
+        const appState = {
+            currentStage: 1,
+            stages: [
+                { id: 1, name: "Upload & Understand", completed: false },
+                { id: 2, name: "Synthesize & Interpret", completed: false },
+                { id: 3, name: "Generate Insights", completed: false },
+                { id: 4, name: "Develop Strategy", completed: false },
+                { id: 5, name: "Export Report", completed: false },
+            ],
+            uploadedFiles: [], // objects like { name, type, size, chunks: [], rowCount: null, analysis: null, isAnalyzing: false, analysisProgress: "" }
+            userContext: "",
+            synthesisResult: null,
+            insights: [],
+            strategy: "",
+            aiHelperChatHistory: [
+                { role: 'ai', text: "Welcome! I'm here to help you at any stage." }
+            ],
+            isLoading: false, // Global loader for synthesis
+        };
+
+        // --- DOM ELEMENT SELECTORS ---
+        const stageNav = document.getElementById('stage-navigation');
+        const contentArea = document.getElementById('content-area');
+        const chatBox = document.getElementById('chat-box');
+        const aiHelperInput = document.getElementById('ai-helper-input');
+        const aiHelperSend = document.getElementById('ai-helper-send');
+
+        // --- API CONFIGURATION ---
+        // The API key is no longer stored here for security.
+        // All API calls are now routed through a secure Netlify serverless function.
+        const SECURE_API_ENDPOINT = '/.netlify/functions/gemini-proxy';
+
+
+        // --- RENDERING LOGIC ---
+
+        function renderStageNavigation() {
+            stageNav.innerHTML = '';
+            appState.stages.forEach(stage => {
+                const stageItem = document.createElement('div');
+                stageItem.className = 'stage-item';
+                if (stage.id === appState.currentStage) stageItem.classList.add('active');
+                if (stage.completed) stageItem.classList.add('completed');
+                
+                stageItem.innerHTML = `
+                    <div class="stage-number">${stage.completed ? '<i class="fas fa-check"></i>' : stage.id}</div>
+                    <span>${stage.name}</span>
+                `;
+
+                if (stage.completed) {
+                    stageItem.onclick = () => {
+                        appState.currentStage = stage.id;
+                        render();
+                    };
+                }
+                stageNav.appendChild(stageItem);
+            });
+        }
+
+        function renderContentArea() {
+            contentArea.innerHTML = '';
+             if (appState.isLoading) {
+                contentArea.innerHTML = getLoadingSpinnerHTML("Synthesizing all findings, please wait...");
+                return;
+            }
+            switch (appState.currentStage) {
+                case 1:
+                    contentArea.innerHTML = getStage1HTML();
+                    attachStage1Listeners();
+                    break;
+                case 2:
+                    contentArea.innerHTML = getStage2HTML();
+                    attachStage2Listeners();
+                    break;
+                default:
+                    contentArea.innerHTML = `<h2>Stage ${appState.currentStage}</h2><p>Content to be added.</p>`;
+            }
+        }
+        
+        function renderAiHelperChat() {
+            chatBox.innerHTML = '';
+            appState.aiHelperChatHistory.forEach(msg => {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `chat-message ${msg.role === 'user' ? 'user-message' : 'ai-message'}`;
+                messageDiv.textContent = msg.text;
+                chatBox.appendChild(messageDiv);
+            });
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        function render() {
+            renderStageNavigation();
+            renderContentArea();
+            renderAiHelperChat();
+        }
+
+        // --- HTML TEMPLATES ---
+
+        function getLoadingSpinnerHTML(text) {
+             return `<div class="flex flex-col items-center justify-center h-full">
+                <svg class="animate-spin -ml-1 mr-3 h-10 w-10 text-blue-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                  <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                <p class="mt-4 text-lg font-medium text-gray-700">${text}</p>
+            </div>`;
+        }
+
+        function getStage1HTML() {
+            const filesHTML = appState.uploadedFiles.map((file, index) => `
+                <div class="bg-gray-100 p-4 rounded-lg text-sm mb-4">
+                    <div class="flex items-center justify-between">
+                        <div class="flex items-center overflow-hidden mr-4">
+                            <i class="fas ${file.type.startsWith('image/') ? 'fa-file-image' : 'fa-file-alt'} text-gray-500 mr-3 flex-shrink-0"></i>
+                            <span class="font-medium truncate" title="${file.name}">${file.name}</span>
+                            <span class="text-gray-500 ml-2 flex-shrink-0">(${(file.size / 1024).toFixed(1)} KB)</span>
+                            ${file.rowCount !== null ? `<span class="ml-4 font-semibold text-blue-600 bg-blue-100 px-2 py-1 rounded-full">${file.rowCount} rows</span>` : ''}
+                        </div>
+                        <div>
+                             <button class="text-sm font-semibold text-red-600 hover:text-red-800 remove-file-btn mr-4" data-index="${index}">&times; Remove</button>
+                             <button class="btn-secondary analyze-file-btn" data-index="${index}" ${file.analysis ? 'disabled' : ''}>
+                                ${file.isAnalyzing ? `<i class="fas fa-spinner fa-spin"></i> ${file.analysisProgress}` : (file.analysis ? '✓ Analyzed' : 'Analyze')}
+                            </button>
+                        </div>
+                    </div>
+                    ${file.analysis ? `
+                        <div class="mt-4 p-4 bg-blue-50 border border-blue-200 rounded-md text-gray-800 text-sm">
+                           ${file.analysis.replace(/\n/g, '<br>')}
+                        </div>
+                    ` : ''}
+                </div>
+            `).join('');
+
+            const canSynthesize = appState.uploadedFiles.length > 0 && appState.uploadedFiles.some(f => f.analysis);
+
+            return `
+                <div class="max-w-4xl mx-auto">
+                    <h2 class="text-3xl font-bold text-gray-800 mb-2">Stage 1: Upload & Understand</h2>
+                    <p class="text-gray-600 mb-8">First, provide the project's context, then upload your files and analyze them individually.</p>
+
+                    <div class="bg-white p-8 rounded-xl shadow-md mb-8">
+                         <h3 class="text-xl font-semibold text-gray-700 mb-1">1. Project Context</h3>
+                         <p class="text-sm text-gray-500 mb-4">Describe your analysis: What is the topic? Research goals? Target audience?</p>
+                        <textarea id="context-input" class="w-full h-32 p-4 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition" placeholder="e.g., This project analyzes social media posts to understand public sentiment towards our new sustainability campaign, targeting Gen Z consumers. The goal is to identify key themes and influencers to inform future messaging.">${appState.userContext}</textarea>
+                    </div>
+
+                    <div class="bg-white p-8 rounded-xl shadow-md mb-8">
+                        <h3 class="text-xl font-semibold text-gray-700 mb-1">2. Project Files</h3>
+                        <p class="text-sm text-gray-500 mb-4">Add your files below. Once uploaded, analyze each one to extract its key data points.</p>
+                        
+                        <div id="drop-zone" class="drop-zone mb-6">
+                            <i class="fas fa-cloud-upload-alt text-4xl text-gray-400 mb-4"></i>
+                            <p class="text-gray-600">Drag & drop files here, or</p>
+                            <label for="file-input" class="mt-2 inline-block bg-blue-100 text-blue-700 font-semibold px-4 py-2 rounded-lg cursor-pointer hover:bg-blue-200">
+                                Browse Files
+                            </label>
+                            <input type="file" id="file-input" class="hidden" multiple>
+                            <p class="text-xs text-gray-500 mt-4">Supports: CSV, XLSX, PDF, PNG, JPG</p>
+                        </div>
+
+                        <div id="file-list" class="space-y-2">${filesHTML}</div>
+                        ${appState.uploadedFiles.length === 0 ? '<p class="text-center text-gray-500 py-4">Your uploaded files will appear here for analysis.</p>' : ''}
+                    </div>
+
+                    <div class="text-center">
+                        <button id="synthesize-btn" class="btn-primary text-lg" ${!canSynthesize ? 'disabled' : ''}>Proceed to Synthesis</button>
+                    </div>
+                </div>
+            `;
+        }
+        
+        function getStage2HTML() {
+             return `
+                <div class="max-w-4xl mx-auto">
+                    <h2 class="text-3xl font-bold text-gray-800 mb-2">Stage 2: Synthesize & Interpret</h2>
+                    <p class="text-gray-600 mb-8">Here is the synthesized interpretation based on your individual file analyses and overall context.</p>
+                    <div id="synthesis-output" class="p-8 bg-white rounded-xl shadow-md space-y-4 prose max-w-none">
+                        ${appState.synthesisResult ? appState.synthesisResult.replace(/\n/g, '<br>') : 'No synthesis yet.'}
+                    </div>
+                     <div class="text-center mt-8">
+                        <button id="proceed-to-insights-btn" class="btn-primary text-lg">Proceed to Generating Insights</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        // --- EVENT LISTENERS ---
+
+        function attachStage1Listeners() {
+            const dropZone = document.getElementById('drop-zone');
+            const fileInput = document.getElementById('file-input');
+            const contextInput = document.getElementById('context-input');
+            const fileList = document.getElementById('file-list');
+            const synthesizeBtn = document.getElementById('synthesize-btn');
+
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(e => dropZone.addEventListener(e, preventDefaults, false));
+            ['dragenter', 'dragover'].forEach(e => dropZone.addEventListener(e, () => dropZone.classList.add('dragover'), false));
+            ['dragleave', 'drop'].forEach(e => dropZone.addEventListener(e, () => dropZone.classList.remove('dragover'), false));
+            dropZone.addEventListener('drop', handleDrop, false);
+
+            fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+            contextInput.addEventListener('input', (e) => { appState.userContext = e.target.value; });
+
+            fileList.addEventListener('click', (e) => {
+                if (e.target.closest('.remove-file-btn')) {
+                    const index = parseInt(e.target.closest('.remove-file-btn').dataset.index, 10);
+                    appState.uploadedFiles.splice(index, 1);
+                    render();
+                }
+                if (e.target.closest('.analyze-file-btn')) {
+                    const index = parseInt(e.target.closest('.analyze-file-btn').dataset.index, 10);
+                    handleAnalyzeSingleFile(index);
+                }
+            });
+            
+            if(synthesizeBtn) {
+                synthesizeBtn.addEventListener('click', handleSynthesizeFindings);
+            }
+        }
+        
+        function attachStage2Listeners() {
+            const proceedBtn = document.getElementById('proceed-to-insights-btn');
+            proceedBtn.addEventListener('click', () => {
+                 appState.stages[1].completed = true;
+                 appState.currentStage = 3;
+                 render();
+            });
+        }
+        
+        function attachGlobalListeners() {
+             aiHelperSend.addEventListener('click', handleAiHelperSend);
+             aiHelperInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); handleAiHelperSend(); }
+             });
+        }
+
+
+        // --- FILE HANDLING LOGIC ---
+
+        function preventDefaults(e) { e.preventDefault(); e.stopPropagation(); }
+        function handleDrop(e) { handleFiles(e.dataTransfer.files); }
+
+        function robustCSVParser(textContent) {
+            const lines = [];
+            let currentLine = '';
+            let inQuotes = false;
+            // Normalize line endings to \n
+            const normalizedText = textContent.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+            for (const char of normalizedText) {
+                if (char === '"') {
+                    inQuotes = !inQuotes;
+                }
+                if (char === '\n' && !inQuotes) {
+                    lines.push(currentLine);
+                    currentLine = '';
+                } else {
+                    currentLine += char;
+                }
+            }
+            // Add the last line if it exists
+            if (currentLine) {
+                lines.push(currentLine);
+            }
+            return lines;
+        }
+
+        function handleFiles(files) {
+            [...files].forEach(file => {
+                const reader = new FileReader();
+                
+                reader.onload = (e) => {
+                    const fileData = {
+                        name: file.name,
+                        type: file.type,
+                        size: file.size,
+                        chunks: [],
+                        rowCount: null,
+                        analysis: null,
+                        isAnalyzing: false,
+                        analysisProgress: ""
+                    };
+
+                    if (file.type.startsWith('image/')) {
+                        // For images, the chunk is the base64 data URL content
+                        const base64Data = e.target.result.split(',')[1];
+                        fileData.chunks.push(base64Data);
+                    } else {
+                        // For text-based files (like CSV)
+                        const textContent = e.target.result;
+                        let dataRows = [];
+                        let header = '';
+                        
+                        if (file.type === 'text/csv' || file.name.endsWith('.csv')) {
+                            const allLines = robustCSVParser(textContent);
+                            const nonEmptyLines = allLines.filter(line => line.trim() !== '');
+                            
+                            if (nonEmptyLines.length > 0) {
+                                header = nonEmptyLines[0];
+                                dataRows = nonEmptyLines.slice(1);
+                                fileData.rowCount = dataRows.length;
+                            } else {
+                                fileData.rowCount = 0;
+                            }
+
+                            if (fileData.rowCount > 0) {
+                                if (fileData.rowCount > CHUNK_SIZE) {
+                                    for (let i = 0; i < dataRows.length; i += CHUNK_SIZE) {
+                                        const batch = dataRows.slice(i, i + CHUNK_SIZE);
+                                        const chunkText = header + '\n' + batch.join('\n');
+                                        fileData.chunks.push(btoa(unescape(encodeURIComponent(chunkText))));
+                                    }
+                                } else {
+                                    const fullText = header + '\n' + dataRows.join('\n');
+                                    fileData.chunks.push(btoa(unescape(encodeURIComponent(fullText))));
+                                }
+                            }
+                        } else {
+                            // For other text files (PDF extracted text, etc.)
+                            const fullText = textContent;
+                             fileData.chunks.push(btoa(unescape(encodeURIComponent(fullText))));
+                        }
+                    }
+                    
+                    appState.uploadedFiles.push(fileData);
+                    render();
+                };
+                
+                reader.onerror = (error) => console.error("Error reading file:", error);
+
+                // Use the correct reader method based on file type
+                if (file.type.startsWith('image/')) {
+                    reader.readAsDataURL(file); // Reads as Base64 data URL for images
+                } else {
+                    reader.readAsText(file); // Reads as plain text for CSV and others
+                }
+            });
+        }
+        
+        // --- API & BUSINESS LOGIC ---
+        
+        async function callGeminiAPI(payload) {
+            const delay = Math.floor(Math.random() * 1000) + 500;
+            await new Promise(resolve => setTimeout(resolve, delay));
+
+            try {
+                // The frontend now calls our own secure serverless function
+                const response = await fetch(SECURE_API_ENDPOINT, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (text) return text;
+
+                // Handle cases where the API returns a response but no valid text (e.g., safety blocks)
+                if (result.candidates && result.candidates[0].finishReason) {
+                     throw new Error(`API call finished with reason: ${result.candidates[0].finishReason}. The content may have been blocked.`);
+                }
+                
+                throw new Error("Invalid API response structure.");
+
+            } catch (error) {
+                console.error("API Call failed:", error.message);
+                return `Error: Unable to get a response from the AI. ${error.message}`;
+            }
+        }
+        
+        async function handleAnalyzeSingleFile(index) {
+            const file = appState.uploadedFiles[index];
+            if (!file || file.isAnalyzing) return;
+
+            file.isAnalyzing = true;
+            const totalChunks = file.chunks.length;
+            let chunkSummaries = [];
+
+            // Case 1: Methodical Chunk-by-Chunk Analysis for large CSVs
+            if (totalChunks > 1) {
+                for (let i = 0; i < totalChunks; i++) {
+                    const processedRows = (i + 1) * CHUNK_SIZE;
+                    file.analysisProgress = `Analyzing ${Math.min(processedRows, file.rowCount)}/${file.rowCount}...`;
+                    render(); // Update UI with progress
+
+                    const chunkPrompt = `You are an AI data analyst. This is batch ${i + 1} of ${totalChunks} from a larger dataset. Briefly summarize the primary themes and overall sentiment of ONLY the data in this batch. If a sentiment column exists, count the number of positive, negative, and neutral entries in this batch.`;
+                    const parts = [
+                        { text: chunkPrompt },
+                        { inline_data: { mime_type: 'text/csv', data: file.chunks[i] } }
+                    ];
+                    const payload = { contents: [{ parts }] };
+                    const summary = await callGeminiAPI(payload);
+                    chunkSummaries.push(`Summary of Batch ${i+1}: ${summary}`);
+                }
+
+                // Final Synthesis of all chunks
+                file.analysisProgress = `Synthesizing...`;
+                render();
+                const synthesisPrompt = `
+                    You are an expert data analysis tutor. You have been provided with ${totalChunks} summaries from sequential batches of a single data file containing exactly ${file.rowCount} entries. Your task is to synthesize these summaries into a single, cohesive analysis of the entire file.
+
+                    BATCH SUMMARIES:
+                    ${chunkSummaries.join('\n\n')}
+
+                    SYNTHESIS TASK:
+                    1.  **Mandatory First Sentence:** Start your response with: "This file contains exactly ${file.rowCount} data entries."
+                    2.  **Thematic Analysis:** Based on all the batch summaries, identify the top 3-5 overarching themes found in the complete dataset.
+                    3.  **Quantitative Sentiment Breakdown:** Look through the batch summaries for sentiment counts. Aggregate these counts to provide a final tally for the entire dataset. Present this clearly, for example:
+                        - Positive: [Number] posts (XX.X%)
+                        - Negative: [Number] posts (XX.X%)
+                        - Neutral: [Number] posts (XX.X%)
+                    4.  **Qualitative Sentiment Summary:** Briefly describe the overall sentiment.
+                    5.  Keep the final synthesized response under 250 words.
+                `;
+                const payload = { contents: [{ parts: [{ text: synthesisPrompt }] }] };
+                file.analysis = await callGeminiAPI(payload);
+            } 
+            // Case 2: Standard Analysis for smaller or non-CSV files
+            else {
+                file.analysisProgress = `Analyzing...`;
+                render();
+                let textPrompt;
+                if (file.rowCount !== null) {
+                    textPrompt = `
+                        SYSTEM ROLE: You are an expert data analysis tutor. Your task is to analyze ONLY the single file provided.
+                        
+                        **CRITICAL FACT:** This file contains exactly **${file.rowCount}** data entries. This has been programmatically verified.
+                        
+                        **ANALYSIS GUIDELINES:**
+                        1.  **Mandatory First Sentence:** Start your response with: "This file contains exactly ${file.rowCount} data entries."
+                        2.  **Thematic Analysis:** Briefly summarize the main themes or topics present in the data.
+                        3.  **Quantitative Sentiment Breakdown:** If a sentiment column exists, count the number of positive, negative, and neutral entries. Present this clearly, for example:
+                            - Positive: [Number] posts (XX.X%)
+                            - Negative: [Number] posts (XX.X%)
+                            - Neutral: [Number] posts (XX.X%)
+                        4.  **Qualitative Sentiment Summary:** Briefly describe the overall sentiment.
+                        Your entire response should be a concise summary (under 150 words).`;
+                } else { // Fallback for images
+                    textPrompt = `
+                        SYSTEM ROLE: You are an expert data analysis tutor. Your task is to analyze ONLY the single file provided, which is a visualization.
+                        
+                        **ANALYSIS GUIDELINES:**
+                        1.  Identify the type of visualization (e.g., Word Cloud, Bar Chart). For Word Clouds, classify it as a **Quantitative Word Frequency Visualization**.
+                        2.  Describe its main takeaway or the most prominent features.
+                        
+                        Your response should be a concise summary (under 150 words).`;
+                }
+
+                const parts = [
+                    { text: textPrompt },
+                    { inline_data: { mime_type: file.type || 'application/octet-stream', data: file.chunks[0] } }
+                ];
+                const payload = { contents: [{ parts }] };
+                file.analysis = await callGeminiAPI(payload);
+            }
+
+            file.isAnalyzing = false;
+            file.analysisProgress = "";
+            render();
+        }
+
+
+        async function handleSynthesizeFindings() {
+            appState.isLoading = true;
+            appState.stages[0].completed = true;
+            appState.currentStage = 2;
+            render();
+
+            let individualAnalyses = "INDIVIDUAL FILE ANALYSES:\n";
+            appState.uploadedFiles.forEach(file => {
+                if(file.analysis) {
+                    individualAnalyses += `--- Analysis of ${file.name} ---\n${file.analysis}\n\n`;
+                }
+            });
+
+            const synthesisPrompt = `
+                SYSTEM ROLE: You are an expert PR/advertising data analysis tutor. Your task is to synthesize the individual file analyses into a single, cohesive interpretation, grounded in the student's project context.
+
+                STUDENT'S PROJECT CONTEXT:
+                ${appState.userContext}
+
+                PRE-ANALYZED FILE SUMMARIES:
+                ${individualAnalyses}
+
+                COMPREHENSIVE SYNTHESIS TASK:
+                Review the student's context and the summaries of each file. Create a detailed, integrated report.
+
+                SECTION 1: INTEGRATED OVERVIEW
+                - Synthesize the individual analyses to describe the project as a whole. How do the different files fit together?
+
+                SECTION 2: PRIMARY FINDINGS (Data-Grounded)
+                - List 5-7 key findings that emerge from looking at ALL the data together. 
+                - Each finding must be a headline, cite which file(s) the evidence comes from, and interpret it in the context of the student's campaign.
+
+                SECTION 3: CONTEXT CONNECTION
+                - Connect at least 3 findings directly to the student's stated goals, target audience, or research questions.
+
+                SECTION 4: UNDERSTANDING CHECK
+                - Ask ONE insightful question that tests the student's understanding of the synthesized findings.
+            `;
+            
+            const payload = { contents: [{ parts: [{ text: synthesisPrompt }] }] };
+            const result = await callGeminiAPI(payload);
+
+            appState.synthesisResult = result;
+            appState.isLoading = false;
+            render();
+        }
+        
+        async function handleAiHelperSend() {
+            const userText = aiHelperInput.value.trim();
+            if (!userText) return;
+
+            appState.aiHelperChatHistory.push({ role: 'user', text: userText });
+            aiHelperInput.value = '';
+            renderAiHelperChat();
+            
+            appState.aiHelperChatHistory.push({ role: 'ai', text: "Thinking..." });
+            renderAiHelperChat();
+            
+            const prompt = `
+                You are a helpful AI tutor. The student is on Stage ${appState.currentStage}.
+                Their project context: ${appState.userContext}
+                Their current data synthesis (if available): ${appState.synthesisResult || 'Not yet generated.'}
+                The student's question is: "${userText}"
+                Provide a helpful, concise, and encouraging response.
+            `;
+            
+            const payload = { contents: [{ parts: [{ text: prompt }] }] };
+            const aiResponse = await callGeminiAPI(payload);
+
+            appState.aiHelperChatHistory.pop();
+            appState.aiHelperChatHistory.push({ role: 'ai', text: aiResponse });
+            renderAiHelperChat();
+        }
+
+        // --- INITIALIZATION ---
+        function init() {
+            attachGlobalListeners();
+            render();
+        }
+
+        init();
+    </script>
+</body>
+</html>
+
